@@ -204,3 +204,93 @@
     )
   )
 )
+
+;; GOVERNANCE FUNCTIONS
+
+;; Create a new funding proposal for community vote
+(define-public (create-proposal
+    (description (string-ascii 256))
+    (amount uint)
+    (target principal)
+    (duration uint)
+  )
+  (begin
+    (try! (check-initialized))
+    ;; Validate proposal parameters
+    (asserts! (> (len description) u0) err-invalid-description)
+    (asserts! (> amount u0) err-zero-amount)
+    (asserts! (not (is-eq target (as-contract tx-sender))) err-invalid-target)
+    (asserts! (and (>= duration minimum-duration) (<= duration maximum-duration))
+      err-invalid-duration
+    )
+    (let (
+        (proposer-balance (unwrap! (map-get? balances tx-sender) err-unauthorized))
+        (proposal-id (+ (var-get proposal-count) u1))
+      )
+      ;; Require governance tokens to create proposals
+      (asserts! (> proposer-balance u0) err-unauthorized)
+      ;; Create proposal record
+      (map-set proposals proposal-id {
+        proposer: tx-sender,
+        description: description,
+        amount: amount,
+        target: target,
+        expires-at: (+ stacks-block-height duration),
+        executed: false,
+        yes-votes: u0,
+        no-votes: u0,
+      })
+      (var-set proposal-count proposal-id)
+      (ok proposal-id)
+    )
+  )
+)
+
+;; Vote on a proposal using governance token weight
+(define-public (vote
+    (proposal-id uint)
+    (vote-for bool)
+  )
+  (begin
+    (try! (check-initialized))
+    (try! (validate-proposal-id proposal-id))
+    (let (
+        (proposal (unwrap! (map-get? proposals proposal-id) err-proposal-not-found))
+        (voter-power (calculate-voting-power tx-sender))
+      )
+      ;; Validate voting eligibility
+      (asserts! (> voter-power u0) err-unauthorized)
+      (asserts! (< stacks-block-height (get expires-at proposal))
+        err-proposal-expired
+      )
+      (asserts!
+        (is-none (map-get? votes {
+          proposal-id: proposal-id,
+          voter: tx-sender,
+        }))
+        err-already-voted
+      )
+      ;; Record vote
+      (map-set votes {
+        proposal-id: proposal-id,
+        voter: tx-sender,
+      }
+        vote-for
+      )
+      ;; Update vote tallies with weighted voting
+      (map-set proposals proposal-id
+        (merge proposal {
+          yes-votes: (if vote-for
+            (+ (get yes-votes proposal) voter-power)
+            (get yes-votes proposal)
+          ),
+          no-votes: (if vote-for
+            (get no-votes proposal)
+            (+ (get no-votes proposal) voter-power)
+          ),
+        })
+      )
+      (ok true)
+    )
+  )
+)
